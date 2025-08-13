@@ -1,15 +1,37 @@
 package parseform
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 )
 
 // Parser represents a form-urlencoded data parser
 type Parser struct{}
+
+// keyGroup represents a group of related form keys
+type keyGroup struct {
+	baseKey   string
+	value     string
+	isSimple  bool
+	isArray   bool
+	isObject  bool
+	children  map[string]*keyGroup
+	arrayData map[int]*keyGroup
+}
+
+// parsedKey represents a parsed form key
+type parsedKey struct {
+	baseKey    string
+	isArray    bool
+	isNested   bool
+	arrayIndex int
+	path       []string
+}
 
 // NewParser creates a new parser instance
 func NewParser() *Parser {
@@ -370,4 +392,362 @@ func ParseFloat(value string) (float64, error) {
 	}
 
 	return strconv.ParseFloat(value, 64)
+}
+
+// FormToJSON converts form-urlencoded data to JSON dynamically
+func (p *Parser) FormToJSON(formData string) ([]byte, error) {
+	// Parse the form data
+	values, err := url.ParseQuery(formData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse form data: %w", err)
+	}
+
+	// Convert to dynamic JSON structure
+	result := p.parseFormFlexibly(values)
+
+	// Convert to JSON
+	jsonData, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal to JSON: %w", err)
+	}
+
+	return jsonData, nil
+}
+
+// FormToJSONBytes converts form-urlencoded data from bytes to JSON
+func (p *Parser) FormToJSONBytes(data []byte) ([]byte, error) {
+	return p.FormToJSON(string(data))
+}
+
+// FormToMap converts form-urlencoded data to a map[string]interface{} dynamically
+func (p *Parser) FormToMap(formData string) (map[string]interface{}, error) {
+	// Parse the form data
+	values, err := url.ParseQuery(formData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse form data: %w", err)
+	}
+
+	// Convert to dynamic map structure
+	result := p.parseFormFlexibly(values)
+	return result, nil
+}
+
+// FormToMapBytes converts form-urlencoded data from bytes to a map
+func (p *Parser) FormToMapBytes(data []byte) (map[string]interface{}, error) {
+	return p.FormToMap(string(data))
+}
+
+// parseFormFlexibly parses any form data structure dynamically
+func (p *Parser) parseFormFlexibly(values url.Values) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	// Group all keys by their base structure
+	keyGroups := p.groupKeysByStructure(values)
+
+	// Process each group
+	for baseKey, group := range keyGroups {
+		if group.isSimple {
+			// Simple key-value pair
+			result[baseKey] = group.value
+		} else if group.isArray {
+			// Array structure
+			result[baseKey] = p.buildArrayFromGroup(group)
+		} else {
+			// Nested object structure
+			result[baseKey] = p.buildObjectFromGroup(group)
+		}
+	}
+
+	return result
+}
+
+// groupKeysByStructure groups form keys by their structure
+func (p *Parser) groupKeysByStructure(values url.Values) map[string]*keyGroup {
+	groups := make(map[string]*keyGroup)
+
+	for key, valueSlice := range values {
+		if len(valueSlice) == 0 {
+			continue
+		}
+
+		value := valueSlice[0]
+
+		// Parse the key structure
+		parsed := p.parseKeyStructure(key)
+
+		// Get or create the base group
+		if groups[parsed.baseKey] == nil {
+			groups[parsed.baseKey] = &keyGroup{
+				baseKey:   parsed.baseKey,
+				children:  make(map[string]*keyGroup),
+				arrayData: make(map[int]*keyGroup),
+			}
+		}
+
+		group := groups[parsed.baseKey]
+
+		if parsed.isArray {
+			group.isArray = true
+			p.addToArrayGroup(group, parsed, value)
+		} else if parsed.isNested {
+			group.isObject = true
+			p.addToObjectGroup(group, parsed, value)
+		} else {
+			group.isSimple = true
+			group.value = value
+		}
+	}
+
+	return groups
+}
+
+// parseKeyStructure parses any key format dynamically
+func (p *Parser) parseKeyStructure(key string) *parsedKey {
+	result := &parsedKey{
+		path: make([]string, 0),
+	}
+
+	// Handle simple keys
+	if !strings.Contains(key, "[") && !strings.Contains(key, "]") {
+		result.baseKey = key
+		return result
+	}
+
+	// Extract base key (everything before first [)
+	openBracket := strings.Index(key, "[")
+	result.baseKey = key[:openBracket]
+
+	// Parse the rest using regex to find all bracket groups
+	re := regexp.MustCompile(`\[([^\]]+)\]`)
+	matches := re.FindAllStringSubmatch(key[openBracket:], -1)
+
+	if len(matches) == 0 {
+		return result
+	}
+
+	// Check if first bracket contains a number (array index)
+	if firstMatch := matches[0][1]; p.isNumeric(firstMatch) {
+		result.isArray = true
+		result.arrayIndex, _ = strconv.Atoi(firstMatch)
+
+		// Add remaining path elements
+		for i := 1; i < len(matches); i++ {
+			result.path = append(result.path, matches[i][1])
+		}
+	} else {
+		result.isNested = true
+		// Add all path elements
+		for _, match := range matches {
+			result.path = append(result.path, match[1])
+		}
+	}
+
+	return result
+}
+
+// addToArrayGroup adds data to an array group
+func (p *Parser) addToArrayGroup(group *keyGroup, parsed *parsedKey, value string) {
+	if group.arrayData[parsed.arrayIndex] == nil {
+		group.arrayData[parsed.arrayIndex] = &keyGroup{
+			baseKey:  fmt.Sprintf("%d", parsed.arrayIndex),
+			children: make(map[string]*keyGroup),
+		}
+	}
+
+	arrayItem := group.arrayData[parsed.arrayIndex]
+
+	if len(parsed.path) == 0 {
+		// Direct value at this index
+		arrayItem.value = value
+		arrayItem.isSimple = true
+	} else {
+		// Nested structure at this index
+		p.addNestedToGroup(arrayItem, parsed.path, value)
+	}
+}
+
+// addToObjectGroup adds data to an object group
+func (p *Parser) addToObjectGroup(group *keyGroup, parsed *parsedKey, value string) {
+	if len(parsed.path) == 0 {
+		// Direct nested value
+		group.value = value
+		group.isSimple = true
+	} else {
+		// Nested structure
+		p.addNestedToGroup(group, parsed.path, value)
+	}
+}
+
+// addNestedToGroup adds nested data to a group
+func (p *Parser) addNestedToGroup(group *keyGroup, path []string, value string) {
+	if len(path) == 0 {
+		group.value = value
+		group.isSimple = true
+		return
+	}
+
+	currentKey := path[0]
+	remainingPath := path[1:]
+
+	if group.children[currentKey] == nil {
+		group.children[currentKey] = &keyGroup{
+			baseKey:  currentKey,
+			children: make(map[string]*keyGroup),
+		}
+	}
+
+	child := group.children[currentKey]
+
+	if len(remainingPath) == 0 {
+		// This is the final value
+		child.value = value
+		child.isSimple = true
+	} else {
+		// Continue nesting
+		p.addNestedToGroup(child, remainingPath, value)
+	}
+}
+
+// buildArrayFromGroup builds an array from a key group
+func (p *Parser) buildArrayFromGroup(group *keyGroup) []interface{} {
+	if len(group.arrayData) == 0 {
+		return []interface{}{}
+	}
+
+	// Find max index to determine array size
+	maxIndex := 0
+	for index := range group.arrayData {
+		if index > maxIndex {
+			maxIndex = index
+		}
+	}
+
+	// Create array with proper size
+	result := make([]interface{}, maxIndex+1)
+
+	// Process each index
+	for index, arrayItem := range group.arrayData {
+		if arrayItem.isSimple {
+			result[index] = arrayItem.value
+		} else if arrayItem.isObject {
+			result[index] = p.buildObjectFromGroup(arrayItem)
+		} else if len(arrayItem.children) > 0 || len(arrayItem.arrayData) > 0 {
+			// Check if it has children or array data to determine type
+			if len(arrayItem.arrayData) > 0 {
+				result[index] = p.buildArrayFromGroup(arrayItem)
+			} else {
+				result[index] = p.buildObjectFromGroup(arrayItem)
+			}
+		}
+	}
+
+	return result
+}
+
+// buildObjectFromGroup builds an object from a key group
+func (p *Parser) buildObjectFromGroup(group *keyGroup) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	// Add simple values
+	if group.isSimple {
+		result["value"] = group.value
+	}
+
+	// Add nested objects
+	for key, child := range group.children {
+		if child.isSimple {
+			result[key] = child.value
+		} else if len(child.children) > 0 || len(child.arrayData) > 0 {
+			// Check if it has children or array data to determine type
+			if len(child.arrayData) > 0 {
+				result[key] = p.buildArrayFromGroup(child)
+			} else {
+				result[key] = p.buildObjectFromGroup(child)
+			}
+		}
+	}
+
+	// Add array data if any - convert int keys to strings
+	for key, child := range group.arrayData {
+		keyStr := fmt.Sprintf("%d", key) // Convert int to string
+		if child.isSimple {
+			result[keyStr] = child.value
+		} else if len(child.children) > 0 || len(child.arrayData) > 0 {
+			// Check if it has children or array data to determine type
+			if len(child.arrayData) > 0 {
+				result[keyStr] = p.buildArrayFromGroup(child)
+			} else {
+				result[keyStr] = p.buildObjectFromGroup(child)
+			}
+		}
+	}
+
+	return result
+}
+
+// isNumeric checks if a string represents a number
+func (p *Parser) isNumeric(s string) bool {
+	_, err := strconv.Atoi(s)
+	return err == nil
+}
+
+// FormToJSONEncoded converts URL-encoded form data with Unicode escapes to JSON
+func (p *Parser) FormToJSONEncoded(encodedData string) ([]byte, error) {
+	// First, unescape Unicode sequences like \u0026 -> &
+	unescapedData := p.unescapeUnicode(encodedData)
+
+	// Then URL decode the data
+	decodedData, err := url.QueryUnescape(unescapedData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to URL decode data: %w", err)
+	}
+
+	// Now convert to JSON
+	return p.FormToJSON(decodedData)
+}
+
+// FormToJSONEncodedBytes converts URL-encoded form data from bytes to JSON
+func (p *Parser) FormToJSONEncodedBytes(data []byte) ([]byte, error) {
+	return p.FormToJSONEncoded(string(data))
+}
+
+// FormToMapEncoded converts URL-encoded form data with Unicode escapes to a map
+func (p *Parser) FormToMapEncoded(encodedData string) (map[string]interface{}, error) {
+	// First, unescape Unicode sequences like \u0026 -> &
+	unescapedData := p.unescapeUnicode(encodedData)
+
+	// Then URL decode the data
+	decodedData, err := url.QueryUnescape(unescapedData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to URL decode data: %w", err)
+	}
+
+	// Now convert to map
+	return p.FormToMap(decodedData)
+}
+
+// FormToMapEncodedBytes converts URL-encoded form data from bytes to a map
+func (p *Parser) FormToMapEncodedBytes(data []byte) (map[string]interface{}, error) {
+	return p.FormToMapEncoded(string(data))
+}
+
+// unescapeUnicode converts Unicode escape sequences to their actual characters
+func (p *Parser) unescapeUnicode(data string) string {
+	// Handle common Unicode escapes
+	replacements := map[string]string{
+		"\\u0026": "&",  // &
+		"\\u0027": "'",  // '
+		"\\u0022": "\"", // "
+		"\\u003C": "<",  // <
+		"\\u003E": ">",  // >
+		"\\u002B": "+",  // +
+		"\\u0020": " ",  // space
+	}
+
+	result := data
+	for escaped, unescaped := range replacements {
+		result = strings.ReplaceAll(result, escaped, unescaped)
+	}
+
+	return result
 }
