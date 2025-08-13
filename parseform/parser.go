@@ -722,13 +722,42 @@ func (p *Parser) FormToJSONEncoded(encodedData string) ([]byte, error) {
 	unescapedData := p.unescapeUnicode(encodedData)
 
 	// Then URL decode the data
-	decodedData, err := url.QueryUnescape(unescapedData)
+	decodedData, err := url.QueryUnescape(unescapedData) // Use unescapedData here
 	if err != nil {
 		return nil, fmt.Errorf("failed to URL decode data: %w", err)
 	}
 
+	// Auto-detect format and convert if needed
+	formData := p.normalizeFormData(decodedData)
+
 	// Now convert to JSON
-	return p.FormToJSON(decodedData)
+	return p.FormToJSON(formData)
+}
+
+// convertMultiLineToForm converts multi-line "key = value" format to standard form format
+func (p *Parser) convertMultiLineToForm(multiLineData string) string {
+	lines := strings.Split(multiLineData, "\n")
+	var formParts []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Split on " = " (space equals space)
+		parts := strings.SplitN(line, " = ", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+
+			// Convert to standard form format: key=value
+			formParts = append(formParts, fmt.Sprintf("%s=%s", key, value))
+		}
+	}
+
+	// Join with & separator
+	return strings.Join(formParts, "&")
 }
 
 // FormToJSONEncodedBytes converts URL-encoded form data from bytes to JSON
@@ -775,4 +804,20 @@ func (p *Parser) unescapeUnicode(data string) string {
 	}
 
 	return result
+}
+
+// normalizeFormData detects and normalizes different form data formats
+func (p *Parser) normalizeFormData(data string) string {
+	// Check if it's multi-line format (contains newlines and " = ")
+	if strings.Contains(data, "\n") && strings.Contains(data, " = ") {
+		return p.convertMultiLineToForm(data)
+	}
+
+	// Check if it's standard form format (contains &)
+	if strings.Contains(data, "&") {
+		return data
+	}
+
+	// If it's just one key-value pair
+	return data
 }
