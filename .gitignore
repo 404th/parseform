@@ -30,3 +30,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+PUBLISHING_GUIDE.md
+parseform/README.md
