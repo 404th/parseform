@@ -589,22 +589,37 @@ func (p *Parser) addNestedToGroup(group *keyGroup, path []string, value string) 
 	currentKey := path[0]
 	remainingPath := path[1:]
 
-	if group.children[currentKey] == nil {
-		group.children[currentKey] = &keyGroup{
-			baseKey:  currentKey,
-			children: make(map[string]*keyGroup),
+	// Check if currentKey is a number (array index)
+	if p.isNumeric(currentKey) {
+		// This is an array index
+		index, _ := strconv.Atoi(currentKey)
+		if group.arrayData[index] == nil {
+			group.arrayData[index] = &keyGroup{
+				baseKey:  currentKey,
+				children: make(map[string]*keyGroup),
+			}
 		}
-	}
-
-	child := group.children[currentKey]
-
-	if len(remainingPath) == 0 {
-		// This is the final value
-		child.value = value
-		child.isSimple = true
+		group.arrayData[index].isArray = true
+		p.addNestedToGroup(group.arrayData[index], remainingPath, value)
 	} else {
-		// Continue nesting
-		p.addNestedToGroup(child, remainingPath, value)
+		// This is a regular key
+		if group.children[currentKey] == nil {
+			group.children[currentKey] = &keyGroup{
+				baseKey:  currentKey,
+				children: make(map[string]*keyGroup),
+			}
+		}
+
+		child := group.children[currentKey]
+
+		if len(remainingPath) == 0 {
+			// This is the final value
+			child.value = value
+			child.isSimple = true
+		} else {
+			// Continue nesting
+			p.addNestedToGroup(child, remainingPath, value)
+		}
 	}
 }
 
@@ -629,8 +644,6 @@ func (p *Parser) buildArrayFromGroup(group *keyGroup) []interface{} {
 	for index, arrayItem := range group.arrayData {
 		if arrayItem.isSimple {
 			result[index] = arrayItem.value
-		} else if arrayItem.isObject {
-			result[index] = p.buildObjectFromGroup(arrayItem)
 		} else if len(arrayItem.children) > 0 || len(arrayItem.arrayData) > 0 {
 			// Check if it has children or array data to determine type
 			if len(arrayItem.arrayData) > 0 {
