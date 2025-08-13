@@ -593,20 +593,32 @@ func (p *Parser) addNestedToGroup(group *keyGroup, path []string, value string) 
 	if p.isNumeric(currentKey) {
 		// This is an array index
 		index, _ := strconv.Atoi(currentKey)
+
+		// Initialize arrayData map if it doesn't exist
+		if group.arrayData == nil {
+			group.arrayData = make(map[int]*keyGroup)
+		}
+
 		if group.arrayData[index] == nil {
 			group.arrayData[index] = &keyGroup{
-				baseKey:  currentKey,
-				children: make(map[string]*keyGroup),
+				baseKey:   currentKey,
+				children:  make(map[string]*keyGroup),
+				arrayData: make(map[int]*keyGroup), // Initialize this too
 			}
 		}
 		group.arrayData[index].isArray = true
 		p.addNestedToGroup(group.arrayData[index], remainingPath, value)
 	} else {
 		// This is a regular key
+		if group.children == nil {
+			group.children = make(map[string]*keyGroup)
+		}
+
 		if group.children[currentKey] == nil {
 			group.children[currentKey] = &keyGroup{
-				baseKey:  currentKey,
-				children: make(map[string]*keyGroup),
+				baseKey:   currentKey,
+				children:  make(map[string]*keyGroup),
+				arrayData: make(map[int]*keyGroup), // Initialize this too
 			}
 		}
 
