@@ -16,7 +16,7 @@ type Parser struct{}
 // keyGroup represents a group of related form keys
 type keyGroup struct {
 	baseKey   string
-	value     string
+	value     interface{} // Change from string to interface{}
 	isSimple  bool
 	isArray   bool
 	isObject  bool
@@ -581,7 +581,8 @@ func (p *Parser) addToObjectGroup(group *keyGroup, parsed *parsedKey, value stri
 // addNestedToGroup adds nested data to a group
 func (p *Parser) addNestedToGroup(group *keyGroup, path []string, value string) {
 	if len(path) == 0 {
-		group.value = value
+		// Convert value to proper type before setting
+		group.value = p.convertValueToType(value)
 		group.isSimple = true
 		return
 	}
@@ -603,7 +604,7 @@ func (p *Parser) addNestedToGroup(group *keyGroup, path []string, value string) 
 			group.arrayData[index] = &keyGroup{
 				baseKey:   currentKey,
 				children:  make(map[string]*keyGroup),
-				arrayData: make(map[int]*keyGroup), // Initialize this too
+				arrayData: make(map[int]*keyGroup),
 			}
 		}
 		group.arrayData[index].isArray = true
@@ -618,21 +619,47 @@ func (p *Parser) addNestedToGroup(group *keyGroup, path []string, value string) 
 			group.children[currentKey] = &keyGroup{
 				baseKey:   currentKey,
 				children:  make(map[string]*keyGroup),
-				arrayData: make(map[int]*keyGroup), // Initialize this too
+				arrayData: make(map[int]*keyGroup),
 			}
 		}
 
 		child := group.children[currentKey]
 
 		if len(remainingPath) == 0 {
-			// This is the final value
-			child.value = value
+			// This is the final value - convert to proper type
+			child.value = p.convertValueToType(value)
 			child.isSimple = true
 		} else {
 			// Continue nesting
 			p.addNestedToGroup(child, remainingPath, value)
 		}
 	}
+}
+
+// convertValueToType converts string values to their appropriate types
+func (p *Parser) convertValueToType(value string) interface{} {
+	// Try to convert to int
+	if intVal, err := strconv.Atoi(value); err == nil {
+		return intVal
+	}
+
+	// Try to convert to int64
+	if int64Val, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return int64Val
+	}
+
+	// Try to convert to float64
+	if floatVal, err := strconv.ParseFloat(value, 64); err == nil {
+		return floatVal
+	}
+
+	// Try to convert to bool
+	if boolVal, err := strconv.ParseBool(value); err == nil {
+		return boolVal
+	}
+
+	// If none of the above, return as string
+	return value
 }
 
 // buildArrayFromGroup builds an array from a key group
